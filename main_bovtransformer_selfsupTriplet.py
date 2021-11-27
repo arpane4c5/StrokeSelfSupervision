@@ -26,14 +26,14 @@ import torch.nn.functional as F
 
 from utils import autoenc_utils
 from datasets.dataset import StrokeFeatureSequenceDataset
-from datasets.dataset_selfsup_hard import StrokeFeaturePairsDataset
+from datasets.dataset_selfsup_hard import StrokeFeatureTripletsDataset
 from models.contrastive import ContrastiveLoss
 import copy
 import time
 import pickle
 #import attn_model
-#import model_transformer as tt
-import siamese_net
+import model_transformer as tt
+#import siamese_net
 import attn_utils
 from create_bovw import make_codebook
 from create_bovw import create_bovw_onehot
@@ -54,10 +54,10 @@ INPUT_SIZE = cluster_size      # OFGRID: 576, 3DCNN: 512, 2DCNN: 2048
 HIDDEN_SIZE = 200
 N_LAYERS = 2
 bidirectional = True
-fstep = 29
+fstep = 1
 
 km_filename = "km_onehot"
-log_path = "logs/bovtrans_selfsup/HA_of20_Hidden200_C300_HardF"+str(fstep)
+log_path = "logs/bovtrans_selfsupTriplet/HA_of20_Hidden200_C300_HardF"+str(fstep)
 # bow_HL_ofAng_grid20 ; bow_HL_2dres ; bow_HL_3dres_seq16; bow_HL_hoof_b20_mth2
 feat_path = "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/logs/bow_HL_ofAng_grid20"
 
@@ -82,33 +82,41 @@ def train_model(features, stroke_names_id, model, dataloaders, criterion,
             running_loss = 0.0
             running_corrects = 0.0
             # Iterate over data.
-            for bno, (x1, x2, vid_path1, stroke1, vid_path2, stroke2, labels) in enumerate(dataloaders[phase]):
+            for bno, (x1, x2, x3, vid_path1, stroke1, vid_path2, stroke2, vid_path3, stroke3) \
+                                in enumerate(dataloaders[phase]):
                 # inputs of shape BATCH x SEQ_LEN x FEATURE_DIM
 #                labels = attn_utils.get_batch_labels(vid_path1, stroke1, labs_keys, labs_values, x1.shape[1])
-                labels = [lab for lab in labels.tolist() for i in range(x1.shape[1])]
+#                labels = [lab for lab in labels.tolist() for i in range(x1.shape[1])]
                 # Extract spatio-temporal features from clip using 3D ResNet (For SL >= 16)
-                x1, x2 = x1.float(), x2.float()
+                x1, x2, x3 = x1.float(), x2.float(), x3.float()
 #                x1 = x1.permute(1, 0, 2).contiguous().to(device)
                 x1_emb = attn_utils.get_long_tensor(x1)
 #                x2 = x2.permute(1, 0, 2).contiguous().to(device)
                 x2_emb = attn_utils.get_long_tensor(x2)
+                x3_emb = attn_utils.get_long_tensor(x3)
                 x1 = x1_emb.to(device)
                 x2 = x2_emb.to(device)
+                x3 = x3_emb.to(device)
                 x1 = x1.t().contiguous()
                 x2 = x2.t().contiguous()
+                x3 = x3.t().contiguous()
                 
-                labels = torch.FloatTensor(labels).to(device)
+#                labels = torch.FloatTensor(labels).to(device)
                 
                 # zero the parameter gradients
                 optimizer.zero_grad()
                 # forward
-                output1, output2 = model(x1, x2)  # output size (SEQ_SIZE, BATCH, NCLUSTERS)
-                output1 = output1.permute(1, 0, 2).contiguous()
-                output2 = output2.permute(1, 0, 2).contiguous()
-                output1 = output1.view(-1, output1.shape[-1])
+                anc_out = F.sigmoid(model(x1))  # output size (SEQ_SIZE, BATCH, NCLUSTERS)
+                pos_out = F.sigmoid(model(x2))
+                neg_out = F.sigmoid(model(x3))
+                anc_out = anc_out.permute(1, 0, 2).contiguous()
+                pos_out = pos_out.permute(1, 0, 2).contiguous()
+                neg_out = neg_out.permute(1, 0, 2).contiguous()
+                anc_out = anc_out.view(-1, anc_out.shape[-1])
 #                output2 = F.softmax(output2.view(-1, output2.shape[-1]), dim=1)
-                output2 = output2.view(-1, output2.shape[-1])
-                loss = criterion(output1, output2, labels)
+                pos_out = pos_out.view(-1, pos_out.shape[-1])
+                neg_out = neg_out.view(-1, neg_out.shape[-1])
+                loss = criterion(anc_out, pos_out, neg_out)
 #                train_loss.append(loss.item())
 
 #                output = output.view(-1, INPUT_SIZE)    # To (BATCH*SEQ_SIZE, NCLUSTERS)
@@ -143,7 +151,7 @@ def train_model(features, stroke_names_id, model, dataloaders, criterion,
 #                best_model_wts = copy.deepcopy(model.state_dict())
 
         print()
-        dataloaders['train'].dataset.regenerateSequencePairs()
+#        dataloaders['train'].dataset.regenerateSequencePairs()
         
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, \
@@ -258,7 +266,7 @@ def extract_trans_feats(model, DATASET, LABELS, CLASS_IDS, BATCH_SIZE,
         # track history if only in train
         with torch.set_grad_enabled(False):
             
-            outputs = model.transformer.get_vec(inputs)  # output size (BATCH, SEQ_SIZE, NCLUSTERS)
+            outputs = model.get_vec(inputs)  # output size (BATCH, SEQ_SIZE, NCLUSTERS)
             outputs = outputs.transpose(0, 1).contiguous()
             
         # convert to start frames and end frames from tensors to lists
@@ -407,10 +415,10 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, SEQ_SIZE=16, STEP=16,
     
     ###########################################################################    
     # Create a Dataset    
-    train_dataset = StrokeFeaturePairsDataset(ft_path, train_lst, DATASET, LABELS, CLASS_IDS, 
+    train_dataset = StrokeFeatureTripletsDataset(ft_path, train_lst, DATASET, LABELS, CLASS_IDS, 
                                          frames_per_clip=SEQ_SIZE, extracted_frames_per_clip=2,
                                          step_between_clips=STEP, future_step=fstep, train=True)
-    val_dataset = StrokeFeaturePairsDataset(ft_path_val, val_lst, DATASET, LABELS, CLASS_IDS, 
+    val_dataset = StrokeFeatureTripletsDataset(ft_path_val, val_lst, DATASET, LABELS, CLASS_IDS, 
                                          frames_per_clip=SEQ_SIZE, extracted_frames_per_clip=2,
                                          step_between_clips=STEP, future_step=fstep, train=False)
     
@@ -439,13 +447,13 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, SEQ_SIZE=16, STEP=16,
     nlayers = 2 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
     nhead = 2 # the number of heads in the multiheadattention models
     dropout = 0.2 # the dropout value
-#    model = tt.TransformerModelSA(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
-    model = siamese_net.SiameseTransformerHANet(ntokens, emsize, nhead, nhid, nlayers, dropout)
+    model = tt.TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
+#    model = siamese_net.SiameseTransformerHANet(ntokens, emsize, nhead, nhid, nlayers, dropout)
     
     # Setup the loss fxn
 #    criterion = nn.CrossEntropyLoss()
 #    criterion = nn.MSELoss()
-    criterion = ContrastiveLoss()
+    criterion = nn.TripletMarginLoss(margin=1, p=2)
     
     model = model.to(device)
 #    print("Params to learn:")

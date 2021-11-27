@@ -51,11 +51,11 @@ INPUT_SIZE = cluster_size      # OFGRID: 576, 3DCNN: 512, 2DCNN: 2048
 HIDDEN_SIZE = 200
 N_LAYERS = 2
 bidirectional = True
-fstep = 29
+fstep = 1
 
 km_filename = "km_onehot"
-log_path = "logs/bovtrans_selfsup/Down_HA_of20_C300_PreC"+str(cluster_size)+"_F"+str(fstep)
-model_path = "logs/bovtrans_selfsup/HA_of20_Hidden200_C300_HardF"+str(fstep) #siamtrans_ep60_S30C200_SGD.pt
+log_path = "logs/bovtrans_selfsupTriplet/Down_HA_of20_C300_PreC"+str(cluster_size)+"_F"+str(fstep)
+model_path = "logs/bovtrans_selfsupTriplet/HA_of20_Hidden200_C300_HardF"+str(fstep)
 # bow_HL_ofAng_grid20 ; bow_HL_2dres ; bow_HL_3dres_seq16; bow_HL_hoof_b20_mth2
 feat_path = "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/logs/bow_HL_ofAng_grid20"
 
@@ -94,7 +94,7 @@ def train_model(features, stroke_names_id, model, dataloaders, criterion,
                 # zero the parameter gradients
                 optimizer.zero_grad()
                 # forward
-                output = model.forward_once(inputs)  # output size (SEQ_SIZE, BATCH, NCLASSES)
+                output = model(inputs)  # output size (SEQ_SIZE, BATCH, NCLASSES)
                 output = output.permute(1, 0, 2).contiguous()
                 
                 output = F.softmax(output.view(-1, output.shape[-1]), dim=1)
@@ -158,7 +158,7 @@ def predict(features, stroke_names_id, model, dataloaders, labs_keys, labs_value
         
         # forward
         with torch.set_grad_enabled(phase == 'train'):
-            outputs = model.forward_once(inputs)     # output size (BATCH, SEQ_SIZE, NCLUSTERS)
+            outputs = model(inputs)     # output size (BATCH, SEQ_SIZE, NCLUSTERS)
             outputs = outputs.permute(1, 0, 2).contiguous()
             outputs = F.softmax(outputs.view(-1, outputs.shape[-1]), dim=1)
 
@@ -173,7 +173,7 @@ def predict(features, stroke_names_id, model, dataloaders, labs_keys, labs_value
     
     ###########################################################################
     
-    confusion_mat = np.zeros((model.transformer.decoder.out_features, model.transformer.decoder.out_features))
+    confusion_mat = np.zeros((model.decoder.out_features, model.decoder.out_features))
     gt_list = [g for batch_list in gt_list for g in batch_list]
     pred_list = [p for batch_list in pred_list for p in batch_list]
     
@@ -380,8 +380,8 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16,
     nlayers = 2 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
     nhead = 2 # the number of heads in the multiheadattention models
     dropout = 0.2 # the dropout value
-    model = siamese_net.SiameseTransformerHANet(ntokens, emsize, nhead, nhid, nlayers, dropout)
-#    model = tt.TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
+#    model = siamese_net.SiameseTransformerHANet(ntokens, emsize, nhead, nhid, nlayers, dropout)
+    model = tt.TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
     
     model = load_weights(model_path, model, 60, 
                                     "S30"+"C"+str(cluster_size)+"_SGDH")
@@ -397,15 +397,15 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16,
     print("Param layers frozen:")
 #    params_to_update = []
     for name, param in model.named_parameters():
-        if param.requires_grad == True:
-            param.requires_grad = False
+#        if param.requires_grad == True:
+#            param.requires_grad = False
             #params_to_update.append(param)
             print("\t", name)
     
-    model.transformer.decoder = nn.Linear(model.transformer.ninp, num_classes)
+    model.decoder = nn.Linear(model.ninp, num_classes)
     initrange = 0.1
-    model.transformer.decoder.bias.data.zero_()
-    model.transformer.decoder.weight.data.uniform_(-initrange, initrange)
+    model.decoder.bias.data.zero_()
+    model.decoder.weight.data.uniform_(-initrange, initrange)
     model = model.to(device)
 
     print("Params to learn:")
@@ -463,7 +463,7 @@ if __name__ == '__main__':
     CLASS_IDS = "/home/arpan/VisionWorkspace/Cricket/cluster_strokes/configs/Class Index_Strokes.txt"    
     ANNOTATION_FILE = "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/shots_classes.txt"
 
-    seq_sizes = range(2, 41, 2)
+    seq_sizes = range(20, 21, 2)
     STEP = 1
     BATCH_SIZE = 64
     N_EPOCHS = 30

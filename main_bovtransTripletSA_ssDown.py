@@ -32,7 +32,7 @@ import copy
 import time
 import pickle
 from create_bovw import make_codebook
-from create_bovw import create_bovw_onehot
+from create_bovw import create_bovw_SA
 #import attn_model
 import siamese_net
 import model_transformer as tt
@@ -51,11 +51,11 @@ INPUT_SIZE = cluster_size      # OFGRID: 576, 3DCNN: 512, 2DCNN: 2048
 HIDDEN_SIZE = 200
 N_LAYERS = 2
 bidirectional = True
-fstep = 29
+fstep = 1
 
 km_filename = "km_onehot"
-log_path = "logs/bovtrans_selfsup/Down_HA_of20_C300_PreC"+str(cluster_size)+"_F"+str(fstep)
-model_path = "logs/bovtrans_selfsup/HA_of20_Hidden200_C300_HardF"+str(fstep) #siamtrans_ep60_S30C200_SGD.pt
+log_path = "logs/bovtrans_selfsupTriplet/Down_SA_of20_C300_PreC"+str(cluster_size)+"_F"+str(fstep)
+model_path = "logs/bovtrans_selfsupTriplet/SA_of20_Hidden200_C300_HardF"+str(fstep)
 # bow_HL_ofAng_grid20 ; bow_HL_2dres ; bow_HL_3dres_seq16; bow_HL_hoof_b20_mth2
 feat_path = "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/logs/bow_HL_ofAng_grid20"
 
@@ -86,15 +86,15 @@ def train_model(features, stroke_names_id, model, dataloaders, criterion,
                 labels = attn_utils.get_batch_labels(vid_path, stroke, labs_keys, labs_values, inputs.shape[1])
                 # Extract spatio-temporal features from clip using 3D ResNet (For SL >= 16)
                 inputs = inputs.float()
-                inp_emb = attn_utils.get_long_tensor(inputs)    # comment out for SA
-                inputs = inp_emb.to(device)                     # comment out for SA
-                inputs = inputs.t().contiguous()       # Convert to (SEQ, BATCH)
+#                inp_emb = attn_utils.get_long_tensor(inputs)    # comment out for SA
+#                inputs = inp_emb.to(device)                     # comment out for SA
+                inputs = inputs.permute(1, 0, 2).contiguous().to(device)       # Convert to (SEQ, BATCH)
                 labels = labels.to(device)
                 
                 # zero the parameter gradients
                 optimizer.zero_grad()
                 # forward
-                output = model.forward_once(inputs)  # output size (SEQ_SIZE, BATCH, NCLASSES)
+                output = model(inputs)  # output size (SEQ_SIZE, BATCH, NCLASSES)
                 output = output.permute(1, 0, 2).contiguous()
                 
                 output = F.softmax(output.view(-1, output.shape[-1]), dim=1)
@@ -151,14 +151,14 @@ def predict(features, stroke_names_id, model, dataloaders, labs_keys, labs_value
         seq = inputs.shape[1]
         labels = attn_utils.get_batch_labels(vid_path, stroke, labs_keys, labs_values, seq)
         inputs = inputs.float()
-        inp_emb = attn_utils.get_long_tensor(inputs)    # comment out for SA
-        inputs = inp_emb.to(device)                     # comment out for SA
-        inputs = inputs.t().contiguous()
+#        inp_emb = attn_utils.get_long_tensor(inputs)    # comment out for SA
+#        inputs = inp_emb.to(device)                     # comment out for SA
+        inputs = inputs.permute(1, 0, 2).contiguous().to(device)
         labels = labels.to(device)
         
         # forward
         with torch.set_grad_enabled(phase == 'train'):
-            outputs = model.forward_once(inputs)     # output size (BATCH, SEQ_SIZE, NCLUSTERS)
+            outputs = model(inputs)     # output size (BATCH, SEQ_SIZE, NCLUSTERS)
             outputs = outputs.permute(1, 0, 2).contiguous()
             outputs = F.softmax(outputs.view(-1, outputs.shape[-1]), dim=1)
 
@@ -173,7 +173,7 @@ def predict(features, stroke_names_id, model, dataloaders, labs_keys, labs_value
     
     ###########################################################################
     
-    confusion_mat = np.zeros((model.transformer.decoder.out_features, model.transformer.decoder.out_features))
+    confusion_mat = np.zeros((model.decoder.out_features, model.decoder.out_features))
     gt_list = [g for batch_list in gt_list for g in batch_list]
     pred_list = [p for batch_list in pred_list for p in batch_list]
     
@@ -314,7 +314,7 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16,
         km_model = pickle.load(open(km_filepath+"_C"+str(cluster_size)+".pkl", 'rb'))
         
     print("Create numpy one hot representation for train features...")
-    onehot_feats = create_bovw_onehot(features, stroke_names_id, km_model)
+    onehot_feats = create_bovw_SA(features, stroke_names_id, km_model)
     
     ft_path = os.path.join(log_path, "C"+str(cluster_size)+"_train.pkl")
     with open(ft_path, "wb") as fp:
@@ -326,7 +326,7 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16,
                                                               snames_val)
     
     print("Create numpy one hot representation for val features...")
-    onehot_feats_val = create_bovw_onehot(features_val, stroke_names_id_val, km_model)
+    onehot_feats_val = create_bovw_SA(features_val, stroke_names_id_val, km_model)
     
     ft_path_val = os.path.join(log_path, "C"+str(cluster_size)+"_val.pkl")
     with open(ft_path_val, "wb") as fp:
@@ -338,7 +338,7 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16,
                                                                 snames_test)
     
     print("Create numpy one hot representation for test features...")
-    onehot_feats_test = create_bovw_onehot(features_test, stroke_names_id_test, km_model)
+    onehot_feats_test = create_bovw_SA(features_test, stroke_names_id_test, km_model)
     
     ft_path_test = os.path.join(log_path, "C"+str(cluster_size)+"_test.pkl")
     with open(ft_path_test, "wb") as fp:
@@ -380,8 +380,8 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16,
     nlayers = 2 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
     nhead = 2 # the number of heads in the multiheadattention models
     dropout = 0.2 # the dropout value
-    model = siamese_net.SiameseTransformerHANet(ntokens, emsize, nhead, nhid, nlayers, dropout)
-#    model = tt.TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
+#    model = siamese_net.SiameseTransformerHANet(ntokens, emsize, nhead, nhid, nlayers, dropout)
+    model = tt.TransformerModelSA(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
     
     model = load_weights(model_path, model, 60, 
                                     "S30"+"C"+str(cluster_size)+"_SGDH")
@@ -402,10 +402,10 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16,
             #params_to_update.append(param)
             print("\t", name)
     
-    model.transformer.decoder = nn.Linear(model.transformer.ninp, num_classes)
+    model.decoder = nn.Linear(model.ninp, num_classes)
     initrange = 0.1
-    model.transformer.decoder.bias.data.zero_()
-    model.transformer.decoder.weight.data.uniform_(-initrange, initrange)
+    model.decoder.bias.data.zero_()
+    model.decoder.weight.data.uniform_(-initrange, initrange)
     model = model.to(device)
 
     print("Params to learn:")
@@ -463,7 +463,7 @@ if __name__ == '__main__':
     CLASS_IDS = "/home/arpan/VisionWorkspace/Cricket/cluster_strokes/configs/Class Index_Strokes.txt"    
     ANNOTATION_FILE = "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/shots_classes.txt"
 
-    seq_sizes = range(2, 41, 2)
+    seq_sizes = range(20, 21, 2)
     STEP = 1
     BATCH_SIZE = 64
     N_EPOCHS = 30

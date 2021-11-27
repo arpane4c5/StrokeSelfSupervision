@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Thu July 25 10:39:42 2021
+Created on Thu November 18 10:39:42 2021
 
 @author: arpan
 
-@Description: Finetuning Transformer model for downstream task of HA sequence classification. 
-Using self-supervised pretrained weights of Contrastive Model.
+@Description: Finetuning Transformer model for downstream task of HA sequence classification 
+using multi-feature setting. Using self-supervised pretrained weights of Contrastive Model.
 """
 
 import os
@@ -26,7 +26,7 @@ import torch.nn.functional as F
 
 from utils import autoenc_utils
 #import datasets.videotransforms as videotransforms
-from datasets.dataset import StrokeFeatureSequenceDataset
+from datasets.dataset import StrokeMultiFeatureSequenceDataset
 from datasets.dataset import StrokeFeaturePairsDataset
 import copy
 import time
@@ -40,12 +40,16 @@ import attn_utils
 from collections import Counter
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-# "of_feats_grid20.pkl", "of_feats_val_grid20.pkl" ; "hoof_feats_b20.pkl"
-# "2dcnn_feats_train.pkl" ; "3dcnn_feats_train.pkl" ; "hoof_feats_val_b20.pkl"
-feat, feat_val, feat_test = "of_feats_grid20.pkl", "of_feats_val_grid20.pkl", "of_feats_test_grid20.pkl"
+feat = ["of_feats_grid20.pkl", "hoof_feats_b20.pkl", "hog_feats.pkl"]
+feat_val = ["of_feats_val_grid20.pkl", "hoof_feats_val_b20.pkl", "hog_feats_val.pkl"]
+feat_test = ["of_feats_test_grid20.pkl", "hoof_feats_test_b20.pkl", "hog_feats_test.pkl"]
 # "of_snames_grid20.pkl" ; "2dcnn_snames_train.pkl" ; "3dcnn_snames_train.pkl";
 # "hoof_snames_b20.pkl"
-snames, snames_val, snames_test = "of_snames_grid20.pkl", "of_snames_val_grid20.pkl", "of_snames_test_grid20.pkl"
+snames = ["of_snames_grid20.pkl", "hoof_snames_b20.pkl", "hog_snames.pkl"]
+snames_val = ["of_snames_val_grid20.pkl", "hoof_snames_val_b20.pkl", "hog_snames_val.pkl"] 
+snames_test = ["of_snames_test_grid20.pkl", "hoof_snames_test_b20.pkl", "hog_snames_test.pkl"]
+# "of_snames_grid20.pkl" ; "2dcnn_snames_train.pkl" ; "3dcnn_snames_train.pkl";
+# "hoof_snames_b20.pkl"
 cluster_size = 300
 INPUT_SIZE = cluster_size      # OFGRID: 576, 3DCNN: 512, 2DCNN: 2048
 HIDDEN_SIZE = 200
@@ -54,10 +58,14 @@ bidirectional = True
 fstep = 29
 
 km_filename = "km_onehot"
-log_path = "logs/bovtrans_selfsup/Down_HA_of20_C300_PreC"+str(cluster_size)+"_F"+str(fstep)
-model_path = "logs/bovtrans_selfsup/HA_of20_Hidden200_C300_HardF"+str(fstep) #siamtrans_ep60_S30C200_SGD.pt
+#log_path = "logs/bovtrans_selfsup/HA_of20_Hidden200_C300_HardF"+str(fstep)
+log_path = "logs/bovtrans_selfsup/Down_HA_MagAngof20_hoofb20_HOG_C300_PreC"+str(fstep)+"_F"+str(fstep)
+model_path = "logs/bovtrans_selfsup/HA_MagAngof20_hoofb20_HOG_HardF"+str(fstep) #siamtrans_ep60_S30C300_SGDH.pt
 # bow_HL_ofAng_grid20 ; bow_HL_2dres ; bow_HL_3dres_seq16; bow_HL_hoof_b20_mth2
-feat_path = "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/logs/bow_HL_ofAng_grid20"
+feat_path = ["/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/logs/bow_HL_ofMagAng_grid20",
+             "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/logs/bow_HL_hoof_b20_mth2",
+             "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/logs/bow_HL_HOG"
+             ]
 
 
 def train_model(features, stroke_names_id, model, dataloaders, criterion, 
@@ -81,7 +89,7 @@ def train_model(features, stroke_names_id, model, dataloaders, criterion,
             running_loss = 0.0
             running_corrects = 0.0
             # Iterate over data.
-            for bno, (inputs, vid_path, stroke, _, labels) in enumerate(dataloaders[phase]):
+            for bno, (inputs, vid_path, stroke, labels) in enumerate(dataloaders[phase]):
                 # inputs of shape BATCH x SEQ_LEN x FEATURE_DIM
                 labels = attn_utils.get_batch_labels(vid_path, stroke, labs_keys, labs_values, inputs.shape[1])
                 # Extract spatio-temporal features from clip using 3D ResNet (For SL >= 16)
@@ -146,7 +154,7 @@ def predict(features, stroke_names_id, model, dataloaders, labs_keys, labs_value
     model = model.eval()
     gt_list, pred_list, stroke_ids  = [], [], []
     # Iterate over data.
-    for bno, (inputs, vid_path, stroke, _, labels) in enumerate(dataloaders[phase]):
+    for bno, (inputs, vid_path, stroke, labels) in enumerate(dataloaders[phase]):
         # inputs of shape BATCH x SEQ_LEN x FEATURE_DIM
         seq = inputs.shape[1]
         labels = attn_utils.get_batch_labels(vid_path, stroke, labs_keys, labs_values, seq)
@@ -288,70 +296,73 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16,
     train_lst, val_lst, test_lst = autoenc_utils.split_dataset_files(DATASET)
     print("No. of training videos : {}".format(len(train_lst)))
         
-    features, stroke_names_id = attn_utils.read_feats(feat_path, feat, snames)
-    # get matrix of features from dictionary (N, vec_size)
-    vecs = []
-    for key in sorted(list(features.keys())):
-        vecs.append(features[key])
-    vecs = np.vstack(vecs)
+    ft_path, ft_path_val, ft_path_test = [], [], []
+    for i, ft_dir in enumerate(feat_path):
+        print("Feature : {}".format(ft_dir))
+        features, stroke_names_id = attn_utils.read_feats(ft_dir, feat[i], snames[i])
+        # get matrix of features from dictionary (N, vec_size)
+        vecs = []
+        for key in sorted(list(features.keys())):
+            vecs.append(features[key])
+        vecs = np.vstack(vecs)
     
-    vecs[np.isnan(vecs)] = 0
-    vecs[np.isinf(vecs)] = 0
+        vecs[np.isnan(vecs)] = 0
+        vecs[np.isinf(vecs)] = 0
     
-    #fc7 layer output size (4096) 
-    INP_VEC_SIZE = vecs.shape[-1]
-    print("INP_VEC_SIZE = ", INP_VEC_SIZE)
+        #fc7 layer output size (4096) 
+        INP_VEC_SIZE = vecs.shape[-1]
+        print("INP_VEC_SIZE = ", INP_VEC_SIZE)
     
-    km_filepath = os.path.join(log_path, km_filename)
-#    # Uncomment only while training.
-    if not os.path.isfile(km_filepath+"_C"+str(cluster_size)+".pkl"):
-        km_model = make_codebook(vecs, cluster_size)  #, model_type='gmm') 
-        ##    # Save to disk, if training is performed
-        print("Writing the KMeans models to disk...")
-        pickle.dump(km_model, open(km_filepath+"_C"+str(cluster_size)+".pkl", "wb"))
-    else:
-        # Load from disk, for validation and test sets.
-        km_model = pickle.load(open(km_filepath+"_C"+str(cluster_size)+".pkl", 'rb'))
+        km_filepath = os.path.join(log_path, km_filename+"_F"+str(i+1))
+        #    # Uncomment only while training.
+        if not os.path.isfile(km_filepath+"_C"+str(cluster_size)+".pkl"):
+            km_model = make_codebook(vecs, cluster_size)  #, model_type='gmm') 
+            ##    # Save to disk, if training is performed
+            print("Writing the KMeans models to disk...")
+            pickle.dump(km_model, open(km_filepath+"_C"+str(cluster_size)+".pkl", "wb"))
+        else:
+            # Load from disk, for validation and test sets.
+            km_model = pickle.load(open(km_filepath+"_C"+str(cluster_size)+".pkl", 'rb'))
         
-    print("Create numpy one hot representation for train features...")
-    onehot_feats = create_bovw_onehot(features, stroke_names_id, km_model)
-    
-    ft_path = os.path.join(log_path, "C"+str(cluster_size)+"_train.pkl")
-    with open(ft_path, "wb") as fp:
-        pickle.dump(onehot_feats, fp)
-    
-    ###########################################################################
-    
-    features_val, stroke_names_id_val = attn_utils.read_feats(feat_path, feat_val, 
-                                                              snames_val)
-    
-    print("Create numpy one hot representation for val features...")
-    onehot_feats_val = create_bovw_onehot(features_val, stroke_names_id_val, km_model)
-    
-    ft_path_val = os.path.join(log_path, "C"+str(cluster_size)+"_val.pkl")
-    with open(ft_path_val, "wb") as fp:
-        pickle.dump(onehot_feats_val, fp)
+        print("Create numpy one hot representation for train features...")
+        onehot_feats = create_bovw_onehot(features, stroke_names_id, km_model)
+        
+        ft_path.append(os.path.join(log_path, "F"+str(i+1)+"_C"+str(cluster_size)+"_train.pkl"))
+        with open(ft_path[-1], "wb") as fp:
+            pickle.dump(onehot_feats, fp)
     
     ###########################################################################
     
-    features_test, stroke_names_id_test = attn_utils.read_feats(feat_path, feat_test, 
-                                                                snames_test)
+        features_val, stroke_names_id_val = attn_utils.read_feats(ft_dir, feat_val[i], 
+                                                                  snames_val[i])
+        
+        print("Create numpy one hot representation for val features...")
+        onehot_feats_val = create_bovw_onehot(features_val, stroke_names_id_val, km_model)
+        
+        ft_path_val.append(os.path.join(log_path, "F"+str(i+1)+"_C"+str(cluster_size)+"_val.pkl"))
+        with open(ft_path_val[-1], "wb") as fp:
+            pickle.dump(onehot_feats_val, fp)
     
-    print("Create numpy one hot representation for test features...")
-    onehot_feats_test = create_bovw_onehot(features_test, stroke_names_id_test, km_model)
+    ###########################################################################
     
-    ft_path_test = os.path.join(log_path, "C"+str(cluster_size)+"_test.pkl")
-    with open(ft_path_test, "wb") as fp:
-        pickle.dump(onehot_feats_test, fp)
+        features_test, stroke_names_id_test = attn_utils.read_feats(ft_dir, feat_test[i], 
+                                                                    snames_test[i])
+        
+        print("Create numpy one hot representation for test features...")
+        onehot_feats_test = create_bovw_onehot(features_test, stroke_names_id_test, km_model)
+        
+        ft_path_test.append(os.path.join(log_path, "F"+str(i+1)+"_C"+str(cluster_size)+"_test.pkl"))
+        with open(ft_path_test[-1], "wb") as fp:
+            pickle.dump(onehot_feats_test, fp)
     
     ###########################################################################    
     # Create a Dataset    
 #    ft_path = os.path.join(base_name, feat_path, feat)
-    train_dataset = StrokeFeaturePairsDataset(ft_path, train_lst, DATASET, LABELS, CLASS_IDS, 
+    train_dataset = StrokeMultiFeatureSequenceDataset(ft_path, train_lst, DATASET, LABELS, CLASS_IDS, 
                                          frames_per_clip=SEQ_SIZE, extracted_frames_per_clip=2,
                                          step_between_clips=STEP, train=True)
 #    ft_path_val = os.path.join(base_name, feat_path, feat_val)
-    val_dataset = StrokeFeaturePairsDataset(ft_path_val, val_lst, DATASET, LABELS, CLASS_IDS, 
+    val_dataset = StrokeMultiFeatureSequenceDataset(ft_path_val, val_lst, DATASET, LABELS, CLASS_IDS, 
                                          frames_per_clip=SEQ_SIZE, extracted_frames_per_clip=2,
                                          step_between_clips=STEP, train=False)
     
@@ -374,7 +385,7 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16,
     ###########################################################################    
     
     # load model and set loss function
-    ntokens = cluster_size # the size of vocabulary
+    ntokens = cluster_size * len(feat_path) # the size of vocabulary
     emsize = 200 # embedding dimension
     nhid = 200 # the dimension of the feedforward network model in nn.TransformerEncoder
     nlayers = 2 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
@@ -471,7 +482,7 @@ if __name__ == '__main__':
     attn_utils.seed_everything(1234)
     acc = []
 
-    print("Siamese Transformer HA model finetuning on OF20 Ang sequences...")
+    print("Siamese Transformer HA model finetuning on multi features HOG OF20 Ang sequences...")
     print("EPOCHS = {} : HIDDEN_SIZE = {} : LAYERS = {}".format(N_EPOCHS, 
           HIDDEN_SIZE, N_LAYERS))
     for SEQ_SIZE in seq_sizes:

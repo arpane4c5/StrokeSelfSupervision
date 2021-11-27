@@ -31,6 +31,7 @@ import time
 
 from utils import autoenc_utils
 import siamese_net
+from pytorch_i3d import InceptionI3d
 import attn_utils
 import copy
 import pickle
@@ -38,7 +39,7 @@ import pickle
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
 pretrained_model_path = '/home/arpan/VisionWorkspace/pytorch-i3d/models/rgb_imagenet.pt'
-selfsup_model_path = 'i3d_ep30_S16_SGD_B64Iter100.pt'  #'i3d_ep30_S16_SGD.pt'
+selfsup_model_path = "i3d_ep30_S16_SGD_B128.pt" # 'i3d_ep30_S16_SGD_B64Iter100.pt'  #'i3d_ep30_S16_SGD.pt'
 #feat_path = "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/logs/bow_HL_ofAng_grid20"
 
 VALID_ENDPOINTS = (
@@ -56,8 +57,8 @@ VALID_ENDPOINTS = (
 #        'Mixed_4e',
 #        'Mixed_4f',
 #        'MaxPool3d_5a_2x2',
-        'Mixed_5b',
-        'Mixed_5c',
+#        'Mixed_5b',
+#        'Mixed_5c',
         'Logits',
         'Predictions',
     )
@@ -122,7 +123,7 @@ def train_model(model, dataloaders, criterion, optimizer, scheduler, labs_keys,
                 # track history if only in train
                 with torch.set_grad_enabled(phase == 'train'):
                     
-                    logits = model.forward_once(inputs)
+                    logits = model(inputs)
                     probs = F.softmax(logits.squeeze(axis=2), dim=1)
                     loss = criterion(probs, labels)
                     _, preds = torch.max(probs, 1)
@@ -139,8 +140,8 @@ def train_model(model, dataloaders, criterion, optimizer, scheduler, labs_keys,
                 running_corrects += torch.sum(preds == labels.data)
                 
 #                print("Batch No : {} / {}".format(bno, len(dataloaders[phase])))
-#                if (bno+1) % 20 == 0:
-#                    break
+                if (bno+1) % 10 == 0:
+                    break
                     
             if phase == 'train':
                 scheduler.step()
@@ -182,7 +183,7 @@ def predict(model, dataloaders, labs_keys, labs_values, phase="val"):
         # track history if only in train
         with torch.set_grad_enabled(phase == 'train'):
             
-            logits = model.forward_once(inputs)
+            logits = model(inputs)
             probs = F.softmax(logits.squeeze(axis=2), dim=1)
             gt_list.append(labels.tolist())
             pred_list.append((torch.max(probs, 1)[1]).tolist())
@@ -198,7 +199,7 @@ def predict(model, dataloaders, labs_keys, labs_values, phase="val"):
 #            break
 #    epoch_loss = running_loss #/ len(dataloaders[phase].dataset)
 #            epoch_acc = running_corrects.double() / len(dataloaders[phase].dataset)
-    confusion_mat = np.zeros((model.i3d._num_classes, model.i3d._num_classes))
+    confusion_mat = np.zeros((model._num_classes, model._num_classes))
     gt_list = [g for batch_list in gt_list for g in batch_list]
     pred_list = [p for batch_list in pred_list for p in batch_list]
     prev_gt = stroke_ids[0]
@@ -286,7 +287,7 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16, S
                                            videotransforms.Resize((224, 224)),
                                            videotransforms.ToTensor(),
                                            videotransforms.Normalize(),
-                                           videotransforms.ScaledNormMinMax(),
+#                                           videotransforms.ScaledNormMinMax(),
     ])
     test_transforms = transforms.Compose([videotransforms.CenterCrop(300), 
                                           videotransforms.ToPILClip(),
@@ -333,8 +334,11 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16, S
     out_size = 200
 #    model = siamese_net.SiameseVTransI3DNet(out_size, pretrained_model_path, SEQ_SIZE // 8)
     # load model and set loss function
-    model = siamese_net.SiameseI3DNet(out_size, in_channels=3, 
-                                      pretrained_wts=pretrained_model_path)
+#    model = siamese_net.SiameseI3DNet(out_size, in_channels=3, 
+#                                      pretrained_wts=pretrained_model_path)
+    model = InceptionI3d(400, in_channels=3)
+    model.load_state_dict(torch.load(pretrained_model_path))
+    model.replace_logits(out_size)
     print("Loading Self-sup pretrained wts : {}".format(os.path.join(base_name, 
           selfsup_model_path)))
     model.load_state_dict(torch.load(os.path.join(base_name, selfsup_model_path)))
@@ -348,7 +352,7 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16, S
 #    inp_feat_size = model.i3d.fc.in_features
 #    model.i3d.fc = nn.Linear(inp_feat_size, num_classes)
     
-    model.i3d.replace_logits(num_classes)
+    model.replace_logits(num_classes)
     
     # Setup the loss fxn
     criterion = nn.CrossEntropyLoss()
@@ -383,9 +387,9 @@ def main(DATASET, LABELS, CLASS_IDS, BATCH_SIZE, ANNOTATION_FILE, SEQ_SIZE=16, S
     end = time.time()
     
     # save the best performing model
-    save_model_checkpoint(base_name, model, N_EPOCHS, "SGD_Mixed5b5c_c5")
+    save_model_checkpoint(base_name, model, N_EPOCHS, "SGD_c5")
     # Load model checkpoints
-    model = load_weights(base_name, model, N_EPOCHS, "SGD_Mixed5b5c_c5")
+    model = load_weights(base_name, model, N_EPOCHS, "SGD_c5")
     
     print("Total Execution time for {} epoch : {}".format(N_EPOCHS, (end-start)))
 
@@ -407,7 +411,7 @@ if __name__ == '__main__':
     DATASET = "/home/arpan/VisionWorkspace/VideoData/sample_cricket/ICC WT20"
     CLASS_IDS = "/home/arpan/VisionWorkspace/Cricket/cluster_strokes/configs/Class Index_Strokes.txt"    
     ANNOTATION_FILE = "/home/arpan/VisionWorkspace/Cricket/CricketStrokeLocalizationBOVW/shots_classes.txt"
-    base_path = "/home/arpan/VisionWorkspace/Cricket/StrokeSelfSupervision/logs/siami3d_selfsup"
+    base_path = "/home/arpan/VisionWorkspace/Cricket/StrokeSelfSupervision/logs/siami3d_selfsup_new"
     
     seq_sizes = range(16, 17, 1)
     STEP = 4
